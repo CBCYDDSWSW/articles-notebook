@@ -1,0 +1,420 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+"http://www.w3.org/TR/html4/loose.dtd">
+<html><head><title></title>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+</head>
+<body>
+<div style="page-break-before:always; page-break-after:always"><div><p>BLISlab: A Sandbox for Optimizing GEMM<br/>FLAME Working Note #80<br/></p>
+<p>Use appropriate PDF viewer so that hyperlinks (denoted with *) work<br/></p>
+<p>Jianyu Huang Robert A. van de Geijn<br/></p>
+<p>August 31, 2016<br/></p>
+<p>Abstract<br/>Matrix-matrix multiplication is a fundamental operation of great importance to scientific computing<br/></p>
+<p>and, increasingly, machine learning. It is a simple enough concept to be introduced in a typical high<br/>school algebra course yet in practice important enough that its implementation on computers continues<br/>to be an active research topic. This note describes a set of exercises that use this operation to illustrate<br/>how high performance can be attained on modern CPUs with hierarchical memories (multiple caches).<br/>It does so by building on the insights that underly the BLAS-like Library Instantiation Software (BLIS)<br/>framework by exposing a simplified &#8220;sandbox&#8221; that mimics the implementation in BLIS. As such, it also<br/>becomes a vehicle for the &#8220;crowd sourcing&#8221; of the optimization of BLIS. We call this set of exercises &#8220;*<br/>BLISlab&#8221;1.<br/></p>
+<p>1 Introduction<br/>Matrix-matrix multiplication (Gemm) is frequently used as a simple example with which to raise awareness<br/>of how to optimize code on modern processors. The reason is that the operation is simple to describe,<br/>challenging to fully optimize, and of practical importance. In this document, we walk the reader through<br/>the techniques that underly the currently fastest implementations for CPU architectures.<br/></p>
+<p>1.1 Basic Linear Algebra Subprograms (BLAS)<br/>The Basic Linear Algebra Subprograms (BLAS) [10, 5, 4, 14] form an interface for a set of linear algebra<br/>operations upon which higher level linear algebra libraries, such at LAPACK [2] and libflame [19], are built.<br/>The idea is that if someone optimizes the BLAS for a given architecture, then all applications and libraries<br/>that are written in terms of calls to the BLAS will benefit from such optimizations.<br/></p>
+<p>The BLAS are divided into three sets: the level-1 BLAS (vector-vector operations), the level-2 BLAS<br/>(matrix-vector operations), and the level-3 BLAS (matrix-matrix operations). The last set benefits from the<br/>fact that, if all matrix operands are n&#215; n in size, O(n3) floating point operations are performed with O(n2)<br/>data so that the cost of moving data between memory layers (main memory, the caches, and the registers)<br/>can be amortized over many computations. As a result, high performance can in principle be achieved if<br/>these operations are carefully implemented.<br/></p>
+<p>1.2 Matrix-matrix multiplication<br/>In particular, Gemm with double precision floating point numbers is supported by the BLAS with the<br/>(Fortran) call<br/></p>
+<p>dgemm( transa, transb, m, n, k alpha, A, lda, B, ldb, beta, C, ldc )<br/></p>
+<p>1https://github.com/flame/blislab<br/></p>
+<p>1</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>which, by appropriately choosing transa and transb, computes<br/></p>
+<p>C := &#945;AB + &#946;C; C := &#945;ATB + &#946;C; C := &#945;ABT + &#946;C; or C := &#945;ATBT + &#946;C.<br/></p>
+<p>Here C is m &#215; n and k is the &#8220;third dimension&#8221;. The parameters dla, dlb, and dlc are explained later in<br/>this document.<br/></p>
+<p>In our exercises, we consider the simplified version of Gemm,<br/></p>
+<p>C := AB + C,<br/></p>
+<p>where C is m &#215; n, A is m &#215; k, and B is k &#215; n. If one understands how to optimize this particular case of<br/>dgemm, then one can easily extend this knowledge to all level-3 BLAS functionality.<br/></p>
+<p>1.3 High-performance implementation<br/>The intricacies of high-performance implementations are such that implementation of the BLAS in general<br/>and Gemm in particular was often relegated to unsung experts who develop numerical libraries for the<br/>hardware vendors, for example as part of IBM&#8217;s ESSL, Intel&#8217;s MKL, Cray&#8217;s LibSci, and AMD&#8217;s ACML<br/>libraries. These libraries were typically written (at least partially) in assembly code and highly specialized<br/>for a specific processor.<br/></p>
+<p>A key paper [1] showed how an &#8220;algorithms and architectures&#8221; approach to hand-in-hand designing ar-<br/>chitectures, compilers, and algorithms allowed BLAS to be written in a high level language (Fortan) for the<br/>IBM Power architectures and explained the intricacies of achieving high performance on those processors.<br/>The Portable High Performance ANSI C (PHiPAC) [3] project subsequently provided guidelines for writing<br/>high-performance code in C and suggested how to autogenerate and tune Gemm written this way. The Au-<br/>tomatically Tuned Linear Algebra Software (ATLAS) [17, 18] built upon these insights and made autotuning<br/>and autogeneration of BLAS libraries mainstream.<br/></p>
+<p>As part of this document we discuss more recent papers on the subject, including the paper that intro-<br/>duced the Goto approach to implementing Gemm [6] and the BLIS refactoring of that approach [16], as well<br/>as other papers that are of more direct relevance.<br/></p>
+<p>1.4 Other similar exercises<br/>There are others who have put together exercises based on Gemm. Recent efforts relevant to this paper are<br/>* GEMM: From Pure C to SSE Optimized Micro Kernels by Michael Lehn at Ulm University and a wiki<br/>on * Optimizing Gemm that we ourselves put together.<br/></p>
+<p>1.5 We need you!<br/>The purpose of this paper is to guide you towards high-performance implementations of Gemm. Our ulterior<br/>motive is that our BLIS framework for implementing BLAS requires a so-called micro-kernel to be highly<br/>optimized for various CPUs. In teaching you the basic techniques, we are hoping to identify &#8220;The One&#8221; who<br/>will contribute the best micro-kernel. Think of it as our version of &#8220;HPC&#8217;s Got Talent&#8221;. Although we focus<br/>in our description on optimization for the Intel Haswell architecture, the setup can be easily modified to<br/>instead help you (and us) optimize for other CPUs. Indeed, BLIS itself supports architectures that include<br/>AMD and Intel&#8217;s x86 processors, IBM&#8217;s Power processors, ARM processors, and Texas Instrument DSP<br/>processors [15, 12, 8].<br/></p>
+<p>2 Step 1: The Basics<br/>2.1 Simple matrix-matrix multiplication<br/>In our discussions, we will consider the computation<br/></p>
+<p>C := AB + C<br/></p>
+<p>2</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>step1<br/>README<br/>sourceme.sh<br/>makefile<br/>dgemm<br/></p>
+<p>my dgemm.c<br/>bl dgemm ref.c<br/>bl dgemm util.c<br/></p>
+<p>include<br/>bl dgemm.h<br/>bl config.h<br/></p>
+<p>lib<br/>libblislab.a<br/>libblislab.so<br/></p>
+<p>make.inc.files<br/>make.intel.inc<br/>make.gnu.inc<br/>make.inc<br/></p>
+<p>test<br/>makefile<br/>test bl dgemm.c<br/>run bl dgemm.sh<br/>test bl dgemm.x<br/>tacc run bl dgemm.sh<br/></p>
+<p>Figure 1: Structure of directory step1.<br/></p>
+<p>where A, B, and C are m&#215; k, k &#215; n, m&#215; n matrices, respectively. Letting<br/></p>
+<p>A =<br/></p>
+<p>&#63723;&#63724;&#63725; a0,0 &#183; &#183; &#183; a0,k&#8722;1<br/>...<br/></p>
+<p>...<br/>am&#8722;1,0 &#183; &#183; &#183; am&#8722;1,k&#8722;1<br/></p>
+<p>&#63734;&#63735;&#63736; , B =<br/></p>
+<p>&#63723;&#63724;&#63725; b0,0 &#183; &#183; &#183; b0,n&#8722;1<br/>...<br/></p>
+<p>...<br/>bk&#8722;1,0 &#183; &#183; &#183; bk&#8722;1,n&#8722;1<br/></p>
+<p>&#63734;&#63735;&#63736; , and C =<br/></p>
+<p>&#63723;&#63724;&#63725; c0,0 &#183; &#183; &#183; c0,n&#8722;1<br/>...<br/></p>
+<p>...<br/>cm&#8722;1,0 &#183; &#183; &#183; cm&#8722;1,n&#8722;1<br/></p>
+<p>&#63734;&#63735;&#63736;<br/>C := AB + C computes<br/></p>
+<p>ci,j :=<br/>k&#8722;1&#8721;<br/>p=0<br/></p>
+<p>ai,pbp,j + ci,j .<br/></p>
+<p>If A, B, and C are stored in two-dimensional arrays A, B, and C, the following pseudocode computes C :=<br/>AB + C:<br/></p>
+<p>for i=0:m-1<br/>for j=0:n-1<br/></p>
+<p>for p=0:k-1<br/>C( i,j ) := A( i,p ) * B( p,j ) + C( i,j )<br/></p>
+<p>endfor<br/>endfor<br/></p>
+<p>endfor<br/></p>
+<p>Counting a multiply and an add separately, the computation requires 2mnk floating point operations (flops).<br/></p>
+<p>2.2 Setup<br/>To let you efficiently learn about how to efficiently compute, you start your project with much of the<br/>infrastructure in place. We have structured the subdirectory, step1, somewhat like a project that implements<br/>a real library might. This may be overkill for our purposes, but how to structure a software project is a<br/>useful skill to learn.<br/></p>
+<p>3</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>for ( i = 0; i &lt; m; i ++ ) { // 2-th loop<br/>for ( j = 0; j &lt; n; j ++ ) { // 1-th loop<br/>for ( p = 0; p &lt; k; p ++ ) { // 0-th loop<br/>C( i, j ) += A( i, p ) * B( p, j );<br/></p>
+<p>} // End 0-th loop<br/>} // End 1-th loop<br/></p>
+<p>} // End 2-th loop<br/></p>
+<p>Figure 2: Simple implementation of Gemm.<br/></p>
+<p>Consider Figure 4, which illustrates the directory structure for subdirectory step1:<br/></p>
+<p>README Is a file that describes the contents of the directory and how to compile and execute the code.<br/></p>
+<p>sourceme.sh Is a file that configures the environment variables. In that file<br/></p>
+<p>BLISLAB USE INTEL sets whether you use the Intel compiler (true) or the GNU compiler (false).<br/>BLISLAB USE BLAS indicates whether your reference dgemm employs an external BLAS library imple-<br/></p>
+<p>mentation (true if you have such a BLAS library installed on your machine), or the simple triple<br/>loops implementation (false).<br/></p>
+<p>COMPILER OPT LEVEL sets the optimization level for your GNU or Intel compiler (O0, O1, O2, O3).<br/>(Notice that, for example, O3 consists of the capital letter &#8221;O&#8221; and the number &#8221;3&#8221;.)<br/></p>
+<p>OMP NUM THREADS and BLISLAB IC NT sets the number of threads used for parallel version of your<br/>code. For Step 1, you set them both to 1.<br/></p>
+<p>dgemm Is the subdirectory where the routines that implement dgemm exist. In it<br/></p>
+<p>bl dgemm ref.c contains the routine dgemm ref that is a simple implementation of dgemm that you<br/>will use to check the correctness of your implementations, if BLISLAB USE BLAS = false.<br/></p>
+<p>my dgemm.c contains the routine dgemm that that initially is a simple implementation of dgemm and<br/>that you will optimize as part of the first step on your way to mastering how to optimize gemm.<br/></p>
+<p>bl dgemm util.c contains utility routines that will later come in handy.<br/></p>
+<p>include This directory contains include files with various macro definitions and other header information.<br/></p>
+<p>lib This directory will hold libraries generated by your implemented source files (libblislab.so and<br/>libblislab.a). You can also install a reference library (e.g. OpenBLAS) in this directory to compare<br/>your performance.<br/></p>
+<p>test This directory contains &#8220;test drivers&#8221; and correctness/performance checking scripts for the various<br/>implementations.<br/></p>
+<p>test bl dgemm.c contains the &#8220;test driver&#8221; for testing routine bl dgemm.<br/>test bl dgemm.x is the executable file for test bl dgemm.c.<br/>run bl dgemm.sh contains a bash script to collect performance results.<br/>tacc run bl dgemm.sh contains a SLURM script for you to (optionally) submit the job to the Texas<br/></p>
+<p>Advanced Computing Center (TACC) machines if you have an account there.<br/></p>
+<p>2.3 Getting started<br/>What we want you to do is to start with the implementation in my dgemm.c and optimize it by applying<br/>various standard optimization techniques. The initial implementation in that file is the straight-forward<br/>implementation with the three loops given in Figure 2. The first thing to notice is how two-dimensional<br/>arrays are mapped to memory in so-called column-major order. The reason for this choice is that the original<br/>BLAS assumed column-major storage of arrays because the interface was for Fortran users first. Examining<br/></p>
+<p>4</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>C( i, j ) += A( i, p ) * B( p, j );<br/></p>
+<p>we notice that, each operand is a MACRO. Consider early in that file<br/></p>
+<p>#define C( i, j ) C[ (j)*ldc + (i) ]<br/></p>
+<p>The linear array at address C is used to store elements Ci,j so that the i, j element is mapped to location<br/>j * ldc + i. The way to view this is that the columns of C are each stored contiguously. However, think<br/>of matrix C as embedded in a larger array that has ldc rows so that accessing a row means going through<br/>array C with stride ldc. The term leading dimension of two-dimensional array C is typically used to refer to<br/>the row dimension of this larger array, hence the variable ldc (leading dimension of C). This is illustrated<br/>for all three matrices in the following figure:<br/></p>
+<p>in which the arrows are meant to indicate that columns are stored contiguously.<br/></p>
+<p>2.3.1 Configure the default implementation<br/></p>
+<p>By default, the exercise compiles and links with Intel&#8217;s icc compiler, which will apply compiler optimizations<br/>(level O3) to the code. You need to set the environment variable by executing:<br/></p>
+<p>$ source sourceme.sh<br/></p>
+<p>in the terminal, and you will see the output:<br/></p>
+<p>BLISLAB_USE_INTEL = true<br/>COMPILER_OPT_LEVEL = O3<br/></p>
+<p>2.3.2 Compile, execute and collect results<br/></p>
+<p>If you do not have access to Intel&#8217;s compiler (icc), then read Subsections 2.3.2 and 2.3.3, and continue with<br/>Subsection 2.3.5.<br/></p>
+<p>You can compile, execute your code and collect the performance result by executing<br/></p>
+<p>make clean<br/>make<br/>cd test<br/>./run_bl_dgemm.sh<br/></p>
+<p>in subdirectorystep1. You will see the performance result output:<br/></p>
+<p>run_step1_st=[<br/>%m %k %n %MY_GFLOPS %REF_GFLOPS<br/>16 16 16 0.82 2.15<br/></p>
+<p>5</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>32 32 32 0.74 5.50<br/>48 48 48 0.85 5.66<br/>......<br/>];<br/></p>
+<p>You can change the sampling block size in run bl dgemm.sh. Notice that if you have errors in your code,<br/>these will be reported as, for example,<br/></p>
+<p>C[ 0 ][ 0 ] != C_ref, 1.253000E+00, 2.253000E+00<br/></p>
+<p>2.3.3 Draw the performance graph<br/></p>
+<p>Finally, you can use MATLAB to draw your performance graph with our scripts. In test subdirectory, after<br/>executing<br/></p>
+<p>./collect_result_step1<br/></p>
+<p>you will get a MATLAB file &#8220;step1 result.m&#8221;, with the performance results. You can then execute<br/></p>
+<p>bl_dgemm_plot.m<br/></p>
+<p>in MATLAB, which will then generate the performance graph.<br/></p>
+<p>2.3.4 Change to the GNU compiler<br/></p>
+<p>Since we want you to explicitly learn about what kind of tricks lead to high performance, and because some<br/>of you may not have access to the Intel compiler, you should next change to using the GNU C compiler. For<br/>this, you must edit sourceme.sh:<br/></p>
+<p>BLISLAB_USE_INTEL=false<br/></p>
+<p>Then, similar to the default setting, you need to set the environment variable by executing:<br/></p>
+<p>$ source sourceme.sh<br/></p>
+<p>in the terminal, and you will observe:<br/></p>
+<p>BLISLAB_USE_INTEL = false<br/>COMPILER_OPT_LEVEL = O3<br/></p>
+<p>2.3.5 Turn off optimization<br/></p>
+<p>Next, we want you to turn off the optimization performed by the compiler. This serves three purposes: first,<br/>it means you are going to have to explicitly perform optimizations, which will allow you to learn about how<br/>architectures and algorithms interact. Second, it may very well be that the optimizing compiler will try to<br/>&#8220;undo&#8221; what you are explicitly trying to accomplish. Third, the more tricks you build into your code, the<br/>harder it gets for the compiler to figure out how to optimize.<br/></p>
+<p>You need first edit sourceme.sh:<br/></p>
+<p>COMPILER_OPT_LEVEL = O0<br/></p>
+<p>Then, similar to the default setting, you need to set the environment variable by executing:<br/></p>
+<p>6</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>$ source sourceme.sh<br/></p>
+<p>in the terminal, and you will see the output:<br/></p>
+<p>BLISLAB_USE_INTEL = false<br/>COMPILER_OPT_LEVEL = O0<br/></p>
+<p>2.3.6 (Optional) Use optimized BLAS library as reference implementation<br/></p>
+<p>By default, your reference Gemm implementation is a very slow triple-loop implementation. If you have a<br/>BLAS library installed on your test machine, you can adopt the dgemm from that library as your reference<br/>implementation by setting:<br/></p>
+<p>BLISLAB_USE_BLAS=true<br/></p>
+<p>in sourceme.sh. If you use Intel compiler, you don&#8217;t need to explicitly specify the path of MKL. However,<br/>if you use GNU compiler, you need to specify the path of your BLAS library. For example, you may want<br/>to install our BLIS library from * https://github.com/flame/blis in directory /home/lib/blis and in<br/>sourceme.sh set<br/></p>
+<p>BLAS_DIR=/home/lib/blis<br/></p>
+<p>After executing $ source sourceme.sh, you will observe:<br/></p>
+<p>BLISLAB_USE_BLAS = true<br/>BLAS_DIR = /home/lib/blis<br/></p>
+<p>and now performance and accuracy comparisons of your implementation will be against this optimized library<br/>routine.<br/></p>
+<p>2.4 Basic techniques<br/>In this subsection we describe some basic tricks of the trade.<br/></p>
+<p>2.4.1 Using pointers<br/></p>
+<p>Now that optimization is turned off, the computation of the address where an element of a matrix exists is<br/>explicitly exposed. (An optimizing compiler would get rid of this overhead.) What you will want to do is to<br/>change the implementation in my gemm.c so that it instead uses pointers. Before you do so, you may want<br/>to back up the original my gemm.c in case you need to restart from scratch. Indeed, at each step you may<br/>want to back up in a separate file the previous implementations.<br/></p>
+<p>Here is the basic idea. Let&#8217;s say we want to set all elements of C to zero. A basic loop, patterned after<br/>what you found in my gemm.c might look like<br/></p>
+<p>for ( i = 0; i &lt; m; i ++ ) {<br/>for ( j = 0; j &lt; n; j ++ ) {<br/></p>
+<p>C( i, j ) = 0.0;<br/>}<br/></p>
+<p>}<br/>Using pointers, we might implement this as<br/></p>
+<p>double *cp;<br/></p>
+<p>7</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>for ( j = 0; j &lt; n; j ++ ) {<br/>cp = &amp;C[ j * ldc ]; // point cp to top of jth column<br/>for ( i = 0; i &lt; m; i ++ ) {<br/></p>
+<p>*cp++ = 0.0; // set the element that cp points to to zero and<br/>// advance the pointer.<br/></p>
+<p>}<br/>}<br/></p>
+<p>Notice that we purposely exchanged the order of the loops so that advancing the pointer takes us down the<br/>columns of C.<br/></p>
+<p>2.4.2 Loop unrolling<br/></p>
+<p>Updating loop index i and the pointer cp every time through the inner loop creates considerable overhead.<br/>For this reason, a compiler will perform loop unrolling. Using an unrolling factor of four, our simple loop for<br/>setting C to zero becomes<br/></p>
+<p>double *cp;<br/></p>
+<p>for ( j = 0; j &lt; n; j ++ ) {<br/>cp = &amp;C[ j * ldc ];<br/></p>
+<p>for ( i = 0; i &lt; m; i += 4 ) {<br/>*(cp+0) = 0.0;<br/>*(cp+1) = 0.0;<br/>*(cp+2) = 0.0;<br/>*(cp+3) = 0.0;<br/>cp += 4;<br/>}<br/></p>
+<p>}<br/></p>
+<p>Importantly:<br/></p>
+<p>&#8226; i and cp are now only updates once every four iterations.<br/></p>
+<p>&#8226; *(cp+0) uses a machine instruction known as indirect addressing that is much more efficient than if<br/>one computed with *(cp+k) where k is a variable.<br/></p>
+<p>&#8226; When data it brought in for memory into cache, it is brought in a cache line of 64 bytes at a time.<br/>This means that accessing contiguous data in chunks of 64 bytes reduces the cost of memory movement<br/>between the memory layers.<br/></p>
+<p>Notice that when you unroll, you may have to deal with a &#8220;fringe&#8221; if, in this case, m is not a multiple of four.<br/>For the sake of this exercise, you need not worry about this fringe as long as you pick your sampling block<br/>size wisely, as reiterated in Section 2.5.<br/></p>
+<p>2.4.3 Register variables<br/></p>
+<p>Notice that computation can only happen if data is stored in registers. A compiler will automatically<br/>transform code so that the intermediate steps that place certain data in registers is inserted. One can give<br/>a hint to the compiler that it would be good to keep certain data in registers as illustrated in the following<br/>somewhat contrived example:<br/></p>
+<p>double *cp;<br/></p>
+<p>for ( j = 0; j &lt; n; j ++ ) {<br/></p>
+<p>8</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>cp = &amp;C[ j * ldc ];<br/>for ( i = 0; i &lt; m; i += 4 ) {<br/></p>
+<p>register double c0=0.0, c1=0.0, c2=0.0, c3=0.0;<br/>*(cp+0) = c0;<br/>*(cp+1) = c1;<br/>*(cp+2) = c2;<br/>*(cp+3) = c3;<br/>cp += 4;<br/></p>
+<p>}<br/>}<br/></p>
+<p>2.5 A modest first goal<br/>We now ask you to employ the techniques discussed above to optimize my dgemm. For now, just worry about<br/>trying to attain better performance for smallish matrices. In particular, consider the following picture:<br/></p>
+<p>What we want you to do is to write your code so that mR &#215;nR blocks of C are kept in registers. You get to<br/>choose mR and nR, but you will want to update file include/bl config.h with those choices. This ensures<br/>that the test driver only tries problem sizes that are multiples of these block sizes, so you don&#8217;t have to<br/>worry about &#8220;fringe&#8221;.<br/></p>
+<p>You will notice that even for smallish matrices that can fit in one of the cache memories, your imple-<br/>mentation performs (much) worse than the implementations that are part of MKL or other optimized BLAS<br/>library that you may have installed. The reason is that the compiler is not using the fastest instructions for<br/>floating point arithmetic. These can be accessed either by using vector intrinsic functions, which allows you<br/>to explicitly utilize them from C, or by coding in assemply code. For now, let&#8217;s not yet go there. We will<br/>talk more about this in Step 3.<br/></p>
+<p>3 Step 2: Blocking<br/>3.1 Poorman&#8217;s BLAS<br/>Step 1 of this exercise makes you realize that with the advent of cache-based architectures, high-performance<br/>implementation of Gemm necessitated careful attention to the amortization of the cost of data movement<br/>between memory layers and computation with that data. To keep this manageable, it helps to realize that<br/>only a &#8220;kernel&#8221; that performs a matrix-matrix multiplication with relatively small matrices needs to be<br/>highly optimized, since computation with larger matrices can be blocked to then use such a kernel without<br/>an adverse impact on overall performance. This insight was explicitly advocated in [9]<br/></p>
+<p>Bo&#778;agstro&#776;m , Per Ling, Charles Van Loan. * GEMM-based level 3 BLAS: high-performance model<br/>implementations and performance evaluation benchmark. ACM Transactions on Mathematical<br/>Software (TOMS). Volume 24 Issue 3, p.268-302, Sept. 1998.<br/></p>
+<p>This is sometimes referred to as &#8221;poorman&#8217;s BLAS&#8221; in the sense that if one could only afford to optimize<br/>matrix-matrix multiplication (with submatrices), then one could build Gemm, and other important matrix-<br/>matrix operations known as the level-3 BLAS, in terms of this. What we will see later is that actually in<br/>general this is a good idea, for the sake of modularity as well as for performance.<br/></p>
+<p>In the last section you already saw an example of blocking.<br/></p>
+<p>9</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>3.2 Blocked matrix-matrix multiplication<br/>Key to blocking Gemm to take advantage of the hierarchical memory of a processor is understanding how<br/>to compute C := AB + C when these matrices have been blocked. Partition<br/></p>
+<p>A =<br/></p>
+<p>&#63723;&#63724;&#63725; A0,0 &#183; &#183; &#183; A0,K&#8722;1<br/>...<br/></p>
+<p>...<br/>AM&#8722;1,0 &#183; &#183; &#183; AM&#8722;1,K&#8722;1<br/></p>
+<p>&#63734;&#63735;&#63736; , B =<br/></p>
+<p>&#63723;&#63724;&#63725; B0,0 &#183; &#183; &#183; B0,N&#8722;1<br/>...<br/></p>
+<p>...<br/>BK&#8722;1,0 &#183; &#183; &#183; BK&#8722;1,N&#8722;1<br/></p>
+<p>&#63734;&#63735;&#63736; , and C =<br/></p>
+<p>&#63723;&#63724;&#63725; C0,0 &#183; &#183; &#183; C0,N&#8722;1<br/>...<br/></p>
+<p>...<br/>CM&#8722;1,0 &#183; &#183; &#183; CM&#8722;1,N&#8722;1<br/></p>
+<p>&#63734;&#63735;&#63736; .<br/></p>
+<p>where Ci,j is mi &#215; nj , Ai,p is mi &#215; kp, and Bp,j is kp &#215; nj . Then<br/></p>
+<p>Ci,j :=<br/>K&#8722;1&#8721;<br/>p=0<br/></p>
+<p>Ai,pBp,j + Ci,j .<br/></p>
+<p>3.3 Your mission, if you choose to accept it<br/>We now ask you to implement the blocked matrix-matrix multiplication in my dgemm. Specifically, for small<br/>matrices you achieve better performance than for larger matrices because the smaller matrices fit in cache.<br/>Block the matrices into submatrices of the size for which you do attain higher performance, and you will see<br/>that the resulting implementation can maintain the better performance even for larger matrices.<br/></p>
+<p>4 Step 3: Blocking for Multiple Levels of Cache<br/>4.1 The Goto Approach to Implementing gemm<br/>Around 2000, Kazushige Goto revolutionized how Gemm is implemented on current CPUs with his techniques<br/>that were first published in the paper [6]<br/></p>
+<p>Kazushige Goto, Robert A. van de Geijn. * Anatomy of high-performance matrix multiplication.<br/>ACM Transactions on Mathematical Software (TOMS). Volume 34 Issue 3, May 2008, Article<br/>No. 12. Also available from * http://shpc.ices.utexas.edu/publications.html.<br/></p>
+<p>A further &#8220;refactoring&#8221; of this approach was more recently described in [16]<br/></p>
+<p>Field G. Van Zee, Robert A. van de Geijn. * BLIS: A Framework for Rapidly Instantiating<br/>BLAS Functionality. ACM Transactions on Mathematical Software (TOMS). Volume 41 Issue 3,<br/>June 2015, Article No. 14. Also available from * http://shpc.ices.utexas.edu/publications.html.<br/></p>
+<p>The advantage of the BLIS framework is that it reduces the kernel that must be highly optimized, possibly<br/>with vector intrinsics or in assemply code, to a micro-kernel. In this section, we briefly describe the highlights<br/>of the approach. However, we strongly suggest the reader become familiar with the above two papers<br/>themselves.<br/></p>
+<p>Figure 3 (left) illustrates the way the Goto approach structures the blocking for three layers of cache<br/>(L1, L2, and L3). In the BLIS framework, the implementation is structured exactly this way so that only<br/>the micro-kernel at the bottom needs to be highly optimized and customized for a given architecture. In<br/>the original GotoBLAS implementation, now maintained as OpenBLAS [11], the operation starting with the<br/>second loop around the micro-kernel is instead customized. In order to get the best performance, it helps<br/>is all data is accessed contiguously, which is why at some point prior to reaching the micro-kernel, data is<br/>packed in the order indicated by the arrows:<br/></p>
+<p>Now, notice that each column of the block of A in the above picture is multiplied by each element in the<br/>corresponding row of the block of B. (We call these blocks of A and B micro-panels.) This means that the<br/>latency to the L2 cache (the time required to bring in an element of the micro-panel of A from that cache)<br/></p>
+<p>10</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>1 <br/></p>
+<p>+=#1 <br/></p>
+<p>L3#cache#<br/>L2#cache#<br/>L1#cache#<br/>registers#<br/></p>
+<p>main#memory#<br/>micro5kernel#<br/></p>
+<p>Update <i>Cij  <br/></i></p>
+<p><i>mR <br/></i></p>
+<p>+=#<br/><i>nR <br/></i></p>
+<p><i>kC <br/></i></p>
+<p>1st#loop#around#micro5kernel#<br/></p>
+<p><i>mR <br/></i></p>
+<p>+=#<br/><i>kC <br/></i></p>
+<p><i>nR <br/></i></p>
+<p>Pack <i>Ai</i>&#8594; <i>Ai <br/></i>~ <br/></p>
+<p><i>nR Ai <br/></i>~ <i>Bp <br/></i></p>
+<p>~ <br/>2nd#loop#around#micro5kernel#<br/></p>
+<p><i>Ci</i> <br/></p>
+<p>3rd#loop#around#micro5kernel#<br/></p>
+<p>+=#<br/></p>
+<p>Pack <i>Bp  </i>&#8594; <i>Bp <br/></i>~ <br/></p>
+<p><i>Bp <br/></i>~ <i>mC <br/></i></p>
+<p><i>Ci</i> <i>Ai</i> <i>mC <br/></i></p>
+<p>4th#loop#around#micro5kernel#<br/></p>
+<p>+=#<br/><i>kC Ap</i> <i>Bp</i> <i>Cj</i> <br/></p>
+<p><i>kC <br/></i></p>
+<p>+=#<br/><i>nC nC <br/></i></p>
+<p>5th#loop#around#micro5kernel#<br/></p>
+<p><i>A</i> <i>B</i> <i>Cj</i> <br/><i>nC nC <br/></i></p>
+<p>Loop 5 for jc =0 : n&#8722;1 steps of nc<br/>Jc =jc : jc+nc&#8722;1<br/></p>
+<p>Loop 4 for pc =0 : k&#8722;1 steps of kc<br/>Pc =pc : pc+kc&#8722;1<br/>B(Pc,Jc) &#8594; Bc // Pack into Bc<br/></p>
+<p>Loop 3 for ic =0 : m&#8722;1 steps of mc<br/>Ic = ic : ic+mc&#8722;1<br/>A(Ic,Pc) &#8594; Ac // Pack into Ac<br/>// Macro-kernel<br/></p>
+<p>Loop 2 for jr =0 : nc&#8722;1 steps of nr<br/>Jr =jr : jr+nr&#8722;1<br/></p>
+<p>Loop 1 for ir =0 : mc&#8722;1 steps of mr<br/>Ir = ir : ir+mr&#8722;1<br/>// Micro-kernel<br/></p>
+<p>Loop 0 for kr =0 : kc&#8722;1<br/>Cc(Ir,Jr)<br/></p>
+<p>+= Ac(Ir, kr) Bc(kr,Jr)<br/>endfor<br/></p>
+<p>endfor<br/>endfor<br/></p>
+<p>endfor<br/>endfor<br/></p>
+<p>Figure 3: Left: The GotoBLAS algorithm for matrix-matrix multiplication as refactored in BLIS. Right: the<br/>same algorithm, but expressed as loops.<br/></p>
+<p>can be amortized over 2nR flops. For this reason, we can organize the computation so that the micro-panel<br/>of A typically resides in the L2 cache. Actually, we can do better: while a rank-1 update is happening with<br/>a column of the micro-panels of A and B, the next column of the micro-panel of A can be brought into<br/>registers so that computation masks the cost of that data movement. The fact that we want to keep the<br/>micro-panel of B in the L1 cache (because it will be reused for many micro-panels of A) limits the blocking<br/>parameter kC .<br/></p>
+<p>With the insights, the rest of the picture hopefully becomes clear. The first loop around the microkernel<br/>works with a block of A, A&#771;i, that has been packed and resides in the L2 cache (by virtue of how the<br/>computation is ordered). This limits the blocking parameter mC . That block of A multiplies a block of B,<br/>B&#771;p, that has been packed to reside in the L3 cache (if the processor has an L3 cache). Notice that the packing<br/>into A&#771;i is amortized over all computation with B&#771;p and the packing into B&#771;p is amortized over computations<br/>with many blocks Ai. The outermost loop partitions B so that the block B&#771;p fits in the L3 cache or, if a<br/>processor does not have an L3 cache, limits the amount of workspace for packing B&#771;p that is needed. This<br/>limits the blocking parameter nC .<br/></p>
+<p>One may ask if the above described scheme is optimal. In [7] a theory is given that shows that under an<br/>idealized model the above is locally optimal (in the sense that assuming data is in a certain memory layer in<br/>the hierarchy, the proposed blocking at that level optimally amortizes the cost of data movement with the<br/>next memory layer). A theory that guides the choice of the various blocking parameters is given in [13].<br/></p>
+<p>11</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>step3<br/>README<br/>sourceme.sh<br/>makefile<br/>dgemm<br/></p>
+<p>my dgemm.c<br/>bl dgemm ref.c<br/>bl dgemm util.c<br/></p>
+<p>include<br/>bl dgemm.h<br/>bl config.h<br/>bl dgemm kernel.h<br/></p>
+<p>kernels<br/>bl dgemm ukr.c<br/></p>
+<p>lib<br/>libblislab.a<br/>libblislab.so<br/></p>
+<p>make.inc.files<br/>make.intel.inc<br/>make.gnu.inc<br/>make.inc<br/></p>
+<p>test<br/>makefile<br/>test bl dgemm.c<br/>run bl dgemm.sh<br/>test bl dgemm.x<br/>tacc run bl dgemm.sh<br/></p>
+<p>Figure 4: Structure of directory step3.<br/></p>
+<p>4.2 Setup<br/>Figure 4 illustrates the directory structure for subdirectory step3. Comparing to step1, we have modi-<br/>fied/added the following directories/files:<br/></p>
+<p>kernels This directory contains the micro-kernel implementations for various architecture.<br/></p>
+<p>bl dgemm ukr.c gives a naive C implementation.<br/>bl dgemm int kernel.c gives an AVX/AVX2 intrinsics micro-kernel implementation for Haswell archi-<br/></p>
+<p>tecture.<br/>bl dgemm asm kernel.c gives an AVX/AVX2 assembly micro-kernel implementation for Haswell archi-<br/></p>
+<p>tecture.<br/></p>
+<p>4.3 Advanced techniques<br/>You can find the vector instructions online:<br/></p>
+<p>&#8226; * Intel Intrinsics Guide<br/></p>
+<p>&#8226; * Intel ISA Extensions<br/></p>
+<p>4.3.1 An introduction example for &#8220;axpy&#8221;<br/></p>
+<p>We provide you an example for the implementation of &#8220;axpy&#8221; to demostrate how to use Intel AVX Intrinsics<br/>and Assembly (in misc/examples subdirectory). This example will serve as a good start point for you to<br/></p>
+<p>12</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>B0 B1 B2 B3<br/></p>
+<p>A0<br/></p>
+<p>A1<br/></p>
+<p>A2<br/></p>
+<p>A3<br/></p>
+<p>00 01 02 <b>03<br/></b></p>
+<p>10 11 12 <b>13<br/></b></p>
+<p>20 21 22 <b>23<br/></b></p>
+<p>30 31 32 <b>33<br/></b></p>
+<p>B0 B1 B2 B3<br/></p>
+<p>A0<br/></p>
+<p>A1<br/></p>
+<p>A2<br/></p>
+<p>A3<br/></p>
+<p><b>00<br/></b></p>
+<p><b>10<br/></b></p>
+<p><b>20<br/></b></p>
+<p><b>30<br/></b></p>
+<p>B0 B1 B2 B3<br/></p>
+<p>A0<br/></p>
+<p>A1<br/></p>
+<p>A2<br/></p>
+<p>A3<br/></p>
+<p>00 <b>01<br/></b></p>
+<p>10 <b>11<br/></b></p>
+<p>20 <b>21<br/></b></p>
+<p>30 <b>31<br/></b></p>
+<p>B0 B1 B2 B3<br/></p>
+<p>A0<br/></p>
+<p>A1<br/></p>
+<p>A2<br/></p>
+<p>A3<br/></p>
+<p>00 01 <b>02<br/></b></p>
+<p>10 11 <b>12<br/></b></p>
+<p>20 21 <b>22<br/></b></p>
+<p>30 31 <b>32<br/></b></p>
+<p>BROADCAST B0, B_tmp<br/>FMA A, B_tmp, C03_0<br/></p>
+<p>BROADCAST B1, B_tmp<br/>FMA A, B_tmp, C03_1<br/></p>
+<p>BROADCAST B2, B_tmp<br/>FMA A, B_tmp, C03_2<br/></p>
+<p>BROADCAST B3, B_tmp<br/>FMA A, B_tmp, C03_3<br/></p>
+<p>Figure 5: AVX 4&#215;4 rank-1 update with broadcast. Given 4&#215;1 vector A and B, we compute the 4&#215;4 outer-<br/>product C by 4 FMA interleaved with vectorized broadcast operations.<br/></p>
+<p>learn basic broacast/fma/load/store instructions. Moreover, this example is actually a primitive for the<br/>&#8220;broadcast&#8221; implementation for 4&#215;4 rank-1 update.<br/></p>
+<p>4.3.2 4&#215;4 rank-1 update<br/></p>
+<p>The micro-kernel implementation can be boiled down to a 4&#215;4 rank-1 update. There are two possible<br/>implementation: one based on broadcast (Figure 5) and and one of a butterfly permutation (Figure 6). You<br/>can also try other possible implementations.<br/></p>
+<p>4.4 Your mission, if you choose to accept it<br/>We provide you a reference implementation of simplified BLIS framework in my dgemm. The code is organized<br/>in the same way presented in Figure 3. However, the step size in each loop is not well choosen, and the<br/>micro-kernel implementation is a naive C version. Therefore. you will not expect high performance with the<br/>code. What we want you to do is to<br/></p>
+<p>&#8226; Specify the blocking parameter mC , nC , kC and the micro-kernel size parameter mR, nR in the file<br/>include/bl config.h; and<br/></p>
+<p>&#8226; Implement the efficient micro-kernel with vector intrinsics or assembly code. Place the code in<br/>kernels/bl dgemm int kernel.c (for vector intrinsics), or kernels/bl dgemm asm kernel.c (for as-<br/></p>
+<p>13</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>B0 B1 B2 B3<br/></p>
+<p>A0<br/></p>
+<p>A1<br/></p>
+<p>A2<br/></p>
+<p>A3<br/></p>
+<p>00 <b>01 </b>02 03<br/></p>
+<p><b>10 </b>11 12 13<br/></p>
+<p>20 21 22 <b>23<br/></b></p>
+<p>30 31 <b>32 </b>33<br/></p>
+<p>B0 B1 B2 B3<br/></p>
+<p>A0<br/></p>
+<p>A1<br/></p>
+<p>A2<br/></p>
+<p>A3<br/></p>
+<p>00 <b>02<br/></b></p>
+<p>11 <b>13<br/></b></p>
+<p><b>20 </b>22<br/></p>
+<p><b>31 </b>33<br/></p>
+<p>B0 B1 B2 B3<br/></p>
+<p>A0<br/></p>
+<p>A1<br/></p>
+<p>A2<br/></p>
+<p>A3<br/></p>
+<p>00 02 <b>03<br/></b></p>
+<p>11 <b>12 </b>13<br/></p>
+<p>20 <b>21 </b>22<br/></p>
+<p><b>30 </b>31 33<br/></p>
+<p>B0 B1 B2 B3<br/></p>
+<p>A0<br/></p>
+<p>A1<br/></p>
+<p>A2<br/></p>
+<p>A3<br/></p>
+<p><b>00<br/></b></p>
+<p><b>11<br/></b></p>
+<p><b>22<br/></b></p>
+<p><b>33<br/></b></p>
+<p>FMA A, B, C03_0 FMA A, B, C03_1<br/></p>
+<p>FMA A, B, C03_2 FMA A, B, C03_3<br/></p>
+<p>SHUFFLE B, B, 0x5<br/></p>
+<p>SHUFFLE B, B, 0x5<br/></p>
+<p>Figure 6: AVX 4&#215;4 rank-1 update with butterfly permutation. Given 4&#215;1 vector A and B, we compute the<br/>4&#215;4 outer-product C by 4 FMA interleaved with vectorized shuffling operations. The 3rd operands (0x5, 0x1)<br/>indicates the shuffling (permutation) type.<br/></p>
+<p>sembly). You need to specify the function name of the micro-kernel by modifying BL MICRO KERNEL in<br/>include/bl config.h.<br/></p>
+<p>5 Step 4: Parallelizing with OpenMP<br/>The benefit of the BLIS way of structuring the GotoBLAS approach to the implementation of Gemm is that<br/>it exposes five loops in tt C which can then be easily parallelized with OpenMP directives.<br/></p>
+<p>5.1 To parallelize or not to parallelize, that&#8217;s the question<br/>The fundamental question becomes which loop to parallelize. In [12]<br/></p>
+<p>Tyler M. Smith, Robert van de Geijn, Mikhail Smelyanskiy, Jeff R. Hammond, and Field G.<br/>Van Zee. * Anatomy of High-Performance Many-Threaded Matrix Multiplication. IEEE 28th<br/>International Parallel and Distributed Processing Symposium, 2014. Also available from *<br/>http://shpc.ices.utexas.edu/publications.html.<br/></p>
+<p>a detailed discussion is given of what the pros and cons are regarding the parallelization of each loop. For<br/>multi-core architectures (multi-threaded architectures with relatively few cores) results can be found in the<br/>earlier paper [15]<br/></p>
+<p>Field G. Van Zee, Tyler Smith, Bryan Marker, Tze Meng Low, Robert A. van de Geijn, Francisco<br/>D. Igual, Mikhail Smelyanskiy, Xianyi Zhang, Michael Kistler, Vernon Austel, John Gunnels, Lee<br/>Killough. * The BLIS Framework: Experiments in Portability. ACM Transactions on Mathe-<br/>matical Software. To appear. Also available from * http://shpc.ices.utexas.edu/publications.html.<br/></p>
+<p>14</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>6 Conclusion<br/>We use GEMM as a case study to show how to program for performance.<br/></p>
+<p>Useful links<br/>Documentation<br/></p>
+<p>&#8226; * The Science of High-Performance Computing (SHPC) group website.<br/></p>
+<p>&#8226; * The FLAME project publications webpage. (The umbrella project that BLIS is part of is known as<br/>the FLAME project.)<br/></p>
+<p>&#8226; * Intel Intrinsics Guide.<br/></p>
+<p>&#8226; * Intel ISA Extensions.<br/></p>
+<p>Software<br/></p>
+<p>&#8226; * BLIS on GitHub.<br/></p>
+<p>&#8226; * Intel Free Software (including C/C++ compilers).<br/></p>
+<p>&#8226; * Intel&#8217;s Math Kernels Library (MKL) website.<br/></p>
+<p>&#8226; * Download MKL for free.<br/></p>
+<p>Acknowledgments<br/>We thank the other members of the Science of High-Performance Computing (SHPC) team for their support.<br/>This research was partially sponsored by the Nantional Science Foundation grant ACI-1148125/1340293 and<br/>Intel through its funding of the SHPC group as an Intel Parallel Computing Center.<br/></p>
+<p>Any opinions, findings and conclusions or recommendations expressed in this material are those of the<br/>author(s) and do not necessarily reflect the views of the National Science Foundation (NSF).<br/></p>
+<p>References<br/>[1] R.C. Agarwal, F.G. Gustavson, and M. Zubair. Exploiting functional parallelism of POWER2 to design<br/></p>
+<p>high-performance numerical algorithms. IBM Journal of Research and Development, 38(5), Sept. 1994.<br/></p>
+<p>[2] E. Anderson, Z. Bai, C. Bischof, L. S. Blackford, J. Demmel, Jack J. Dongarra, J. Du Croz, S. Ham-<br/>marling, A. Greenbaum, A. McKenney, and D. Sorensen. LAPACK Users&#8217; guide (third ed.). Society<br/>for Industrial and Applied Mathematics, Philadelphia, PA, USA, 1999.<br/></p>
+<p>[3] Jeff Bilmes, Krste Asanovic&#769;, Chee whye Chin, and Jim Demmel. Optimizing matrix multiply using<br/>PHiPAC: a Portable, High-Performance, ANSI C coding methodology. In Proceedings of International<br/>Conference on Supercomputing, Vienna, Austria, July 1997.<br/></p>
+<p>[4] Jack J. Dongarra, Jeremy Du Croz, Sven Hammarling, and Iain Duff. A set of level 3 basic linear<br/>algebra subprograms. ACM Trans. Math. Soft., 16(1):1&#8211;17, March 1990.<br/></p>
+<p>[5] Jack J. Dongarra, Jeremy Du Croz, Sven Hammarling, and Richard J. Hanson. An extended set of<br/>FORTRAN basic linear algebra subprograms. ACM Trans. Math. Soft., 14(1):1&#8211;17, March 1988.<br/></p>
+<p>[6] Kazushige Goto and Robert A. van de Geijn. Anatomy of a high-performance matrix multipli-<br/>cation. ACM Trans. Math. Soft., 34(3):12, May 2008. Article 12, 25 pages, Available from *<br/>http://shpc.ices.utexas.edu/publications.html.<br/></p>
+<p>15</p>
+
+</div></div>
+<div style="page-break-before:always; page-break-after:always"><div><p>[7] John A. Gunnels, Greg M. Henry, and Robert A. van de Geijn. A family of high-performance matrix<br/>multiplication algorithms. In Vassil N. Alexandrov, Jack J. Dongarra, Benjoe A. Juliano, Rene&#769; S.<br/>Renner, and C.J. Kenneth Tan, editors, Computational Science - ICCS 2001, Part I, Lecture Notes in<br/>Computer Science 2073, pages 51&#8211;60. Springer-Verlag, 2001.<br/></p>
+<p>[8] Francisco D. Igual, Murtaza Ali, Arnon Friedmann, Eric Stotzer, Timothy Wentz, , and Robert van de<br/>Geijn. Unleashing the high-performance and low-power of multi-core dsps for general-purpose hpc. In<br/>SC12, 2012.<br/></p>
+<p>[9] B. K&#778;agstro&#776;m, P. Ling, and C. Van Loan. GEMM-based level 3 BLAS: High performance model imple-<br/>mentations and performance evaluation benchmark. ACM Trans. Math. Soft., 24(3):268&#8211;302, 1998.<br/></p>
+<p>[10] C. L. Lawson, R. J. Hanson, D. R. Kincaid, and F. T. Krogh. Basic linear algebra subprograms for<br/>Fortran usage. ACM Trans. Math. Soft., 5(3):308&#8211;323, Sept. 1979.<br/></p>
+<p>[11] OpenBLAS, an optimized BLAS library. http://www.openblas.net.<br/></p>
+<p>[12] Tyler M. Smith, Robert van de Geijn, Mikhail Smelyanskiy, Jeff R. Hammond, , and Field G. Van<br/>Zee. Anatomy of high-performance many-threaded matrix multiplication. In International Parallel and<br/>Distributed Processing Symposium 2014, 2014.<br/></p>
+<p>[13] Tze Meng Low, Francisco D. Igual, Tyler M. Smith, and Enrique S. Quintana-Ort&#769;&#305;. Analytical modeling<br/>is enough for high performance blis. ACM Transactions on Mathematical Software. in review. Available<br/>from * http://shpc.ices.utexas.edu/publications.html.<br/></p>
+<p>[14] Robert van de Geijn and Kazushige Goto. Encyclopedia of Parallel Computing, Part 2, chapter Robert<br/>van de Geijn and Kazushige Goto, pages 157&#8211;164. Springer, 2011.<br/></p>
+<p>[15] Field G. Van Zee, Tyler Smith, Bryan Marker, Tze Meng Low, Robert A. van de Geijn, Francisco D.<br/>Igual, Mikhail Smelyanskiy, Xianyi Zhang, Michael Kistler, Vernon Austel, John Gunnels, and Lee Kil-<br/>lough. The blis framework: Experiments in portability. ACM Transactions on Mathematical Software.<br/>to appear.<br/></p>
+<p>[16] Field G. Van Zee and Robert A. van de Geijn. BLIS: A framework for rapidly instantiating blas<br/>functionality (replicated computational results certified). ACM Trans. Math. Soft., 41(3):14:1&#8211;14:33,<br/>June 2015. Available from * http://shpc.ices.utexas.edu/publications.html.<br/></p>
+<p>[17] R. Clint Whaley and Jack J. Dongarra. Automatically tuned linear algebra software. In Proceedings of<br/>SC&#8217;98, 1998.<br/></p>
+<p>[18] R. Clint Whaley, Antoine Petitet, and Jack J. Dongarra. Automated empirical optimizations of software<br/>and the atlas project. Parallel Computing, 27(1-2):3&#8211;35, 2001.<br/></p>
+<p>[19] Field G. Van Zee. libflame: The Complete Reference. www.lulu.com, 2009.<br/></p>
+<p>16</p>
+
+</div></div>
+</body></html>
